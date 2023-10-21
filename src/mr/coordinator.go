@@ -8,11 +8,51 @@ import "net/http"
 
 
 type Coordinator struct {
-	// Your definitions here.
+	files   []string
+	nReduce int
+	nMap    int
+	// phase   SchedulePhase
+	tasks   []Task
 
+	heartbeatCh chan HeartbeatMsg
+	reportCh    chan ReportMsg
+	doneCh      chan struct{}
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+func (c *Coordinator) Heartbeat(request *HeartbeatRequest, response *HeartbeatResponse) error {
+	msg := HeartbeatMsg{response, make(chan struct{})}
+	c.heartbeatCh <- msg
+	<-msg.ok
+	return nil
+}
+
+func (c *Coordinator) Report(request *ReportRequest, response *ReportResponse) error {
+	msg := ReportMsg{request, make(chan struct{})}
+	c.reportCh <- msg
+	<-msg.ok
+	return nil
+}
+
+func (c *Coordinator) schedule() {
+	c.initMapPhase()
+	for {
+		select {
+		case msg := <-c.heartbeatCh:
+            // TODO
+			msg.ok <- struct{}{}
+		case msg := <-c.reportCh:
+            // TODO
+			msg.ok <- struct{}{}
+		}
+	}
+}
+
+func (c *Coordinator) initMapPhase() {
+
+}
+
 
 //
 // an example RPC handler.

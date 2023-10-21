@@ -8,6 +8,7 @@ package mr
 
 import "os"
 import "strconv"
+import "time"
 
 //
 // example to show how to declare the arguments
@@ -23,6 +24,57 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type TaskStatus int
+
+const (
+	unassigned TaskStatus = 0
+	assigned TaskStatus = 1
+	complete TaskStatus = 2
+)
+
+
+type Task struct {
+	fileName  string
+	id        int
+	startTime time.Time
+	status    TaskStatus
+}
+
+type JobType int
+
+const (
+	MapJob JobType = 0
+	ReduceJob JobType = 1
+	WaitJob JobType = 2
+	CompleteJob JobType = 3
+)
+
+type HeartbeatRequest struct {
+}
+
+type HeartbeatResponse struct{
+	jobtype JobType
+	task 	Task
+	nReduce int
+}
+
+type HeartbeatMsg struct {
+	response *HeartbeatResponse
+	ok       chan struct{}
+}
+
+type ReportRequest struct {
+
+}
+
+type ReportResponse struct {
+
+}
+
+type ReportMsg struct {
+	request *ReportRequest
+	ok      chan struct{}
+}
 
 
 // Cook up a unique-ish UNIX-domain socket name
