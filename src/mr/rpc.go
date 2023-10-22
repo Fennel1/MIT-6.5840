@@ -27,9 +27,10 @@ type ExampleReply struct {
 type TaskStatus int
 
 const (
-	unassigned TaskStatus = 0
-	assigned TaskStatus = 1
-	complete TaskStatus = 2
+	unassigned 	TaskStatus = 0
+	assigned 	TaskStatus = 1
+	timeout 	TaskStatus = 2
+	finished 	TaskStatus = 3
 )
 
 
@@ -43,9 +44,9 @@ type Task struct {
 type JobType int
 
 const (
-	MapJob JobType = 0
-	ReduceJob JobType = 1
-	WaitJob JobType = 2
+	MapJob 		JobType = 0
+	ReduceJob 	JobType = 1
+	WaitJob 	JobType = 2
 	CompleteJob JobType = 3
 )
 
@@ -56,6 +57,7 @@ type HeartbeatResponse struct{
 	jobtype JobType
 	task 	Task
 	nReduce int
+	nMap 	int
 }
 
 type HeartbeatMsg struct {
@@ -64,7 +66,8 @@ type HeartbeatMsg struct {
 }
 
 type ReportRequest struct {
-
+	jobtype JobType
+	id		int
 }
 
 type ReportResponse struct {

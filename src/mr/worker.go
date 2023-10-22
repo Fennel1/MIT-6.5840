@@ -7,6 +7,7 @@ import "hash/fnv"
 import "time"
 import "os"
 import "sort"
+import "bufio"
 
 
 //
@@ -40,7 +41,6 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
 	// uncomment to send the Example RPC to the coordinator.
 	for {
 		response := doHeartbeat()
@@ -60,27 +60,25 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 }
 
 func doHeartbeat() *HeartbeatResponse {
-	args := HeartbeatRequest{}
-	reply := HeartbeatResponse{}
-	call("Coordinator.Heartbeat", &args, &reply)
-	return &reply
+	request := HeartbeatRequest{}
+	response := HeartbeatResponse{}
+	call("Coordinator.Heartbeat", &request, &response)
+	return &response
 }
 
 func doMapTask(mapf func(string, string) []KeyValue, response *HeartbeatResponse) {
+	fmt.Print(response.task.fileName)
 	content, err := os.ReadFile(response.task.fileName)
+	fmt.Print(11111)
 	if err != nil {
         log.Fatal(err)
     }
 	intermediate := mapf(response.task.fileName, string(content))
 	sort.Sort(ByKey(intermediate))
 
-	outnamelist := make([]string, response.nReduce)
-	for i := 0; i < response.nReduce; i++ {
-		outnamelist[i] = fmt.Sprintf("mr-%v-%v-tmp", response.task.id, i)
-	}
 	outfiles := make([]*os.File, response.nReduce)
 	for i := 0; i < response.nReduce; i++ {
-		outfiles[i], err = os.Create(outnamelist[i])
+		outfiles[i], err = os.Create(fmt.Sprintf("mr-%v-%v-tmp", response.task.id, i))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -88,27 +86,63 @@ func doMapTask(mapf func(string, string) []KeyValue, response *HeartbeatResponse
 	for i := 0; i < len(intermediate); i++ {		// write to tmp files
 		kv := intermediate[i]
 		j := ihash(kv.Key) % response.nReduce
-		outfile := outfiles[j]
-		if outfile == nil {
-			outfile, err = os.Create(outnamelist[j])
-			if err != nil {
-				log.Fatal(err)
-			}
-			outfiles[j] = outfile
-		}
-		fmt.Fprintf(outfile, "%v %v\n", kv.Key, kv.Value)
+		fmt.Fprintf(outfiles[j], "%v %v\n", kv.Key, kv.Value)
 	}
 	for i := 0; i < response.nReduce; i++ {		// close all files & rename
 		outfiles[i].Close()
-		err := os.Rename(outnamelist[i], fmt.Sprintf("mr-%v-%v", response.task.id, i))
+		err := os.Rename(fmt.Sprintf("mr-%v-%v-tmp", response.task.id, i), fmt.Sprintf("mr-%v-%v", response.task.id, i))
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
+
+	request := ReportRequest{}
+	reply := ReportResponse{}
+	request.jobtype = MapJob
+	request.id = response.task.id
+	call("Coordinator.Report", &request, &reply)
 }
 
 func doReduceTask(reducef func(string, []string) string, response *HeartbeatResponse) {
-	
+	intermediate := make(map[string][]string)
+	for i := 0; i < response.nMap; i++ {
+		file, err := os.Open(fmt.Sprintf("mr-%v-%v", i, response.task.id))
+		if err != nil {
+			log.Fatal(err)
+		}
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			var key, value string
+			_, err := fmt.Sscanf(line, "%s %s", &key, &value)
+			if err != nil {
+				log.Fatal(err)
+			} else {
+				intermediate[key] = append(intermediate[key], value)
+			}
+		}
+		file.Close()
+	}
+
+	outfile, err := os.Create(fmt.Sprintf("mr-out-%v-tmp", response.task.id))
+	if err != nil {
+		log.Fatal(err)
+	}
+	for key, values := range intermediate {
+		output := reducef(key, values)
+		fmt.Fprintf(outfile, "%v %v\n", key, output)
+	}
+	outfile.Close()
+	err = os.Rename(fmt.Sprintf("mr-out-%v-tmp", response.task.id), fmt.Sprintf("mr-out-%v", response.task.id))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	request := ReportRequest{}
+	reply := ReportResponse{}
+	request.jobtype = ReduceJob
+	request.id = response.task.id
+	call("Coordinator.Report", &request, &reply)
 }
 
 //
