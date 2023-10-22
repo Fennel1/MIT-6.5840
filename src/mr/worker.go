@@ -44,7 +44,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// uncomment to send the Example RPC to the coordinator.
 	for {
 		response := doHeartbeat()
-		switch response.jobtype {
+		// fmt.Printf("do map task %s\n", response.Task.FileName)
+		switch response.Jobtype {
 		case MapJob:
 			doMapTask(mapf, response)
 		case ReduceJob:
@@ -54,7 +55,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		case CompleteJob:
 			return
 		default:
-			panic(fmt.Sprintf("unexpected jobType %v", response.jobtype))
+			panic(fmt.Sprintf("unexpected jobType %v", response.Jobtype))
 		}
 	}
 }
@@ -67,30 +68,30 @@ func doHeartbeat() *HeartbeatResponse {
 }
 
 func doMapTask(mapf func(string, string) []KeyValue, response *HeartbeatResponse) {
-	fmt.Print(response.task.fileName)
-	content, err := os.ReadFile(response.task.fileName)
-	fmt.Print(11111)
+	// fmt.Printf("do map task %v do file %s\n", response.Task.Id, response.Task.FileName)
+	content, err := os.ReadFile(response.Task.FileName)
 	if err != nil {
+		fmt.Printf("doMapTask %v: cannot open %v\n", response.Task.Id, response.Task.FileName)
         log.Fatal(err)
     }
-	intermediate := mapf(response.task.fileName, string(content))
+	intermediate := mapf(response.Task.FileName, string(content))
 	sort.Sort(ByKey(intermediate))
 
-	outfiles := make([]*os.File, response.nReduce)
-	for i := 0; i < response.nReduce; i++ {
-		outfiles[i], err = os.Create(fmt.Sprintf("mr-%v-%v-tmp", response.task.id, i))
+	outfiles := make([]*os.File, response.NumReduce)
+	for i := 0; i < response.NumReduce; i++ {
+		outfiles[i], err = os.Create(fmt.Sprintf("mr-%v-%v-tmp", response.Task.Id, i))
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 	for i := 0; i < len(intermediate); i++ {		// write to tmp files
 		kv := intermediate[i]
-		j := ihash(kv.Key) % response.nReduce
+		j := ihash(kv.Key) % response.NumReduce
 		fmt.Fprintf(outfiles[j], "%v %v\n", kv.Key, kv.Value)
 	}
-	for i := 0; i < response.nReduce; i++ {		// close all files & rename
+	for i := 0; i < response.NumReduce; i++ {		// close all files & rename
 		outfiles[i].Close()
-		err := os.Rename(fmt.Sprintf("mr-%v-%v-tmp", response.task.id, i), fmt.Sprintf("mr-%v-%v", response.task.id, i))
+		err := os.Rename(fmt.Sprintf("mr-%v-%v-tmp", response.Task.Id, i), fmt.Sprintf("mr-%v-%v", response.Task.Id, i))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -98,16 +99,17 @@ func doMapTask(mapf func(string, string) []KeyValue, response *HeartbeatResponse
 
 	request := ReportRequest{}
 	reply := ReportResponse{}
-	request.jobtype = MapJob
-	request.id = response.task.id
+	request.Jobtype = MapJob
+	request.Id = response.Task.Id
 	call("Coordinator.Report", &request, &reply)
 }
 
 func doReduceTask(reducef func(string, []string) string, response *HeartbeatResponse) {
 	intermediate := make(map[string][]string)
-	for i := 0; i < response.nMap; i++ {
-		file, err := os.Open(fmt.Sprintf("mr-%v-%v", i, response.task.id))
+	for i := 0; i < response.NumMap; i++ {
+		file, err := os.Open(fmt.Sprintf("mr-%v-%v", i, response.Task.Id))
 		if err != nil {
+			fmt.Printf("doReduceTask %v: cannot open %v\n", response.Task.Id, fmt.Sprintf("mr-%v-%v", i, response.Task.Id))
 			log.Fatal(err)
 		}
 		scanner := bufio.NewScanner(file)
@@ -124,7 +126,7 @@ func doReduceTask(reducef func(string, []string) string, response *HeartbeatResp
 		file.Close()
 	}
 
-	outfile, err := os.Create(fmt.Sprintf("mr-out-%v-tmp", response.task.id))
+	outfile, err := os.Create(fmt.Sprintf("mr-out-%v-tmp", response.Task.Id))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -133,15 +135,15 @@ func doReduceTask(reducef func(string, []string) string, response *HeartbeatResp
 		fmt.Fprintf(outfile, "%v %v\n", key, output)
 	}
 	outfile.Close()
-	err = os.Rename(fmt.Sprintf("mr-out-%v-tmp", response.task.id), fmt.Sprintf("mr-out-%v", response.task.id))
+	err = os.Rename(fmt.Sprintf("mr-out-%v-tmp", response.Task.Id), fmt.Sprintf("mr-out-%v", response.Task.Id))
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	request := ReportRequest{}
 	reply := ReportResponse{}
-	request.jobtype = ReduceJob
-	request.id = response.task.id
+	request.Jobtype = ReduceJob
+	request.Id = response.Task.Id
 	call("Coordinator.Report", &request, &reply)
 }
 

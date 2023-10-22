@@ -35,29 +35,29 @@ const (
 
 
 type Task struct {
-	fileName  string
-	id        int
-	startTime time.Time
-	status    TaskStatus
+	FileName  string
+	Id        int
+	StartTime time.Time
+	Status    TaskStatus
 }
 
 type JobType int
 
 const (
-	MapJob 		JobType = 0
-	ReduceJob 	JobType = 1
-	WaitJob 	JobType = 2
-	CompleteJob JobType = 3
+	CompleteJob JobType = 0
+	MapJob 		JobType = 1
+	ReduceJob 	JobType = 2
+	WaitJob 	JobType = 3
 )
 
 type HeartbeatRequest struct {
 }
 
 type HeartbeatResponse struct{
-	jobtype JobType
-	task 	Task
-	nReduce int
-	nMap 	int
+	Jobtype JobType
+	Task 	Task
+	NumReduce int
+	NumMap 	int
 }
 
 type HeartbeatMsg struct {
@@ -66,8 +66,8 @@ type HeartbeatMsg struct {
 }
 
 type ReportRequest struct {
-	jobtype JobType
-	id		int
+	Jobtype JobType
+	Id		int
 }
 
 type ReportResponse struct {

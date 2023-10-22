@@ -1,20 +1,22 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"time"
+)
 
 type Coordinator struct {
 	files   []string
 	nReduce int
 	nMap    int
 	// phase   SchedulePhase
-	tasks   []Task
-	finMapTaskNum 		int
-	finReduceTaskNum 	int
+	tasks            []Task
+	finMapTaskNum    int
+	finReduceTaskNum int
 
 	heartbeatCh chan HeartbeatMsg
 	reportCh    chan ReportMsg
@@ -42,42 +44,61 @@ func (c *Coordinator) schedule() {
 	for {
 		select {
 		case msg := <-c.heartbeatCh:
-			if c.finMapTaskNum < c.nMap {	// assign map task
-				taskNum := len(c.tasks)
+			taskNum := len(c.tasks)
+			for i := 0; i < taskNum; i++ {
+				if c.tasks[i].Status == assigned {
+					if time.Now().Sub(c.tasks[i].StartTime) > 10*time.Second {
+						c.tasks[i].Status = unassigned
+					}
+				}
+			}
+			if c.finMapTaskNum < c.nMap { // assign map task
+				assign := false
 				for i := 0; i < taskNum; i++ {
-					task := c.tasks[i]
-					if task.status == unassigned {
-						task.status = assigned
-						msg.response.jobtype = MapJob
-						msg.response.task = task
-						msg.response.nReduce = c.nReduce
+					if c.tasks[i].Status == unassigned {
+						c.tasks[i].Status = assigned
+						c.tasks[i].StartTime = time.Now()
+						msg.response.Jobtype = MapJob
+						msg.response.Task = c.tasks[i]
+						msg.response.NumReduce = c.nReduce
+						assign = true
 						break
 					}
+				}
+				if !assign {
+					msg.response.Jobtype = WaitJob
 				}
 				msg.ok <- struct{}{}
-			} else {						// assign reduce task
-				taskNum := len(c.tasks)
+			} else if c.finReduceTaskNum < c.nReduce { // assign reduce task
+				assign := false
 				for i := 0; i < taskNum; i++ {
-					task := c.tasks[i]
-					if task.status == unassigned {
-						task.status = assigned
-						msg.response.jobtype = ReduceJob
-						msg.response.task = task
-						msg.response.nMap = c.nMap
+					if c.tasks[i].Status == unassigned {
+						c.tasks[i].Status = assigned
+						c.tasks[i].StartTime = time.Now()
+						msg.response.Jobtype = ReduceJob
+						msg.response.Task = c.tasks[i]
+						msg.response.NumMap = c.nMap
+						assign = true
 						break
 					}
 				}
+				if !assign {
+					msg.response.Jobtype = WaitJob
+				}
+				msg.ok <- struct{}{}
+			} else {
+				msg.response.Jobtype = CompleteJob
 				msg.ok <- struct{}{}
 			}
 		case msg := <-c.reportCh:
-			if msg.request.jobtype == MapJob {
-				c.tasks[msg.request.id].status = finished
+			if msg.request.Jobtype == MapJob && c.tasks[msg.request.Id].Status == assigned {
+				c.tasks[msg.request.Id].Status = finished
 				c.finMapTaskNum++
 				if c.finMapTaskNum == c.nMap {
 					c.initReducePhase()
 				}
-			} else if msg.request.jobtype == ReduceJob {
-				c.tasks[msg.request.id].status = finished
+			} else if msg.request.Jobtype == ReduceJob && c.tasks[msg.request.Id].Status == assigned {
+				c.tasks[msg.request.Id].Status = finished
 				c.finReduceTaskNum++
 				if c.finReduceTaskNum == c.nReduce {
 					c.doneCh <- struct{}{}
@@ -88,38 +109,38 @@ func (c *Coordinator) schedule() {
 	}
 }
 
+func Now() {
+	panic("unimplemented")
+}
+
 func (c *Coordinator) initMapPhase() {
+	c.finMapTaskNum = 0
 	c.tasks = make([]Task, c.nMap)
 	for i := 0; i < c.nMap; i++ {
-		c.tasks[i].fileName = c.files[i]
-		c.tasks[i].id = i
-		c.tasks[i].status = unassigned
+		c.tasks[i].FileName = c.files[i]
+		c.tasks[i].Id = i
+		c.tasks[i].Status = unassigned
 	}
 }
 
 func (c *Coordinator) initReducePhase() {
+	c.finReduceTaskNum = 0
 	c.tasks = make([]Task, c.nReduce)
 	for i := 0; i < c.nReduce; i++ {
-		c.tasks[i].id = i
-		c.tasks[i].status = unassigned
+		c.tasks[i].Id = i
+		c.tasks[i].Status = unassigned
 	}
 }
 
-
-//
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
 
-
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -133,24 +154,21 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-//
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
-//
 func (c *Coordinator) Done() bool {
 	ret := true
 
 	// Your code here.
-	<- c.doneCh
+	<-c.doneCh
+	// fmt.Printf("finish all tasks\n")
 
 	return ret
 }
 
-//
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
@@ -158,8 +176,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.files = files
 	c.nMap = len(files)
 	c.nReduce = nReduce
-	c.heartbeatCh = make(chan HeartbeatMsg)
-	c.reportCh = make(chan ReportMsg)
+	c.heartbeatCh = make(chan HeartbeatMsg, 1)
+	c.reportCh = make(chan ReportMsg, 1)
 	c.doneCh = make(chan struct{})
 	go c.schedule()
 
