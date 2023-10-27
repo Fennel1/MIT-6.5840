@@ -374,11 +374,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEnt
 	}
 
 	if request.Term > rf.currentTerm {
-		rf.ChangeState(Follower)
 		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
 
 	DPrintf("{Node %v} HeartBeat", rf.me)
+	rf.ChangeState(Follower)
 	rf.electionTimer.Reset(RandomizedElectionTimeout())
 
 	if request.PrevLogIndex < rf.getFirstLog().Index {
