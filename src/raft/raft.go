@@ -163,6 +163,13 @@ type InstallSnapshotResponse struct {
 
 func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
 	request := new(InstallSnapshotRequest)
+	request.Term = rf.currentTerm
+	request.LearderId = rf.me
+	request.LastIncludedIndex = rf.getFirstLog().Index
+	request.LastIncludedTerm = rf.getFirstLog().Term
+	request.Offset = 0
+	request.Data = rf.persister.ReadSnapshot()
+	request.Done = true
 	return request
 }
 
@@ -171,8 +178,75 @@ func (rf *Raft) sendInstallSnapshot(peer int, request *InstallSnapshotRequest, r
 	return ok
 }
 
-func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex %v to check whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
 
+	// outdated snapshot
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me, lastIncludedIndex, rf.commitIndex)
+		return false
+	}
+
+	if lastIncludedIndex > rf.getLastLog().Index {
+		rf.logs = make([]Entry, 1)
+	} else {
+		rf.logs = shrinkEntriesArray(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.logs[0].Command = nil
+	}
+	// update dummy entry with lastIncludedTerm and lastIncludedIndex
+	rf.logs[0].Term, rf.logs[0].Index = lastIncludedTerm, lastIncludedIndex
+	rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
+
+	rf.persister.Save(rf.persister.ReadRaftState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
+	return true
+}
+
+func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+	if rf.state == Leader && rf.currentTerm == request.Term {
+		if response.Term > rf.currentTerm {
+			rf.ChangeState(Follower)
+			rf.currentTerm, rf.votedFor = response.Term, -1
+			rf.persist()
+		} else {
+			rf.nextIndex[peer] = request.LastIncludedIndex + 1
+			rf.matchIndex[peer] = request.LastIncludedIndex
+		}
+	}
+}
+
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing InstallSnapshotRequest %v and reply InstallSnapshotResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
+
+	response.Term = rf.currentTerm
+	if request.Term < rf.currentTerm {
+		return
+	}
+
+	if request.Term > rf.currentTerm {
+		rf.currentTerm, rf.votedFor = request.Term, -1
+		rf.persist()
+	}
+	rf.ChangeState(Follower)
+	rf.electionTimer.Reset(RandomizedElectionTimeout())
+
+	// outdated snapshot
+	if request.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      request.Data,
+			SnapshotTerm:  request.LastIncludedTerm,
+			SnapshotIndex: request.LastIncludedIndex,
+		}
+	}()
 }
 
 // the service says it has created a snapshot that has
@@ -181,7 +255,17 @@ func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshot
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	snapshotIndex := rf.getFirstLog().Index
+	if index <= snapshotIndex {
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+		return
+	}
+	rf.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
+	rf.logs[0].Command = nil
+	rf.persister.Save(rf.persister.ReadRaftState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
 }
 
 
@@ -366,7 +450,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEnt
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
 
 	if request.Term < rf.currentTerm {
 		response.Term, response.Success = rf.currentTerm, false
@@ -413,7 +497,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEnt
 	}
 	rf.advanceCommitIndexForFollower(request.LeaderCommit)
 	response.Term, response.Success = rf.currentTerm, true
-	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
+	// DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
 }
 
 func shrinkEntriesArray(entries []Entry) []Entry {
@@ -516,8 +600,8 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.ChangeState(Candidate)
 			rf.currentTerm++
-			rf.electionTimer.Reset(RandomizedElectionTimeout())
 			rf.StartElection()
+			rf.electionTimer.Reset(RandomizedElectionTimeout())
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
@@ -531,8 +615,8 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// ms := 50 + (rand.Int63() % 300)
+		// time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -682,8 +766,8 @@ func Min(a, b int) int {
 }
 
 const (
-	HeartbeatTimeout = 100
-	ElectionTimeout  = 500
+	HeartbeatTimeout = 125
+	ElectionTimeout  = 1000
 )
 
 func StableHeartbeatTimeout() time.Duration {
