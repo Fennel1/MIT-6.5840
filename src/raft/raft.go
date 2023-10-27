@@ -147,6 +147,33 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
+type InstallSnapshotRequest struct {
+	Term 				int
+	LearderId			int
+	LastIncludedIndex	int
+	LastIncludedTerm	int
+	Offset				int
+	Data				[]byte
+	Done				bool
+}
+
+type InstallSnapshotResponse struct {
+	Term				int
+}
+
+func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
+	request := new(InstallSnapshotRequest)
+	return request
+}
+
+func (rf *Raft) sendInstallSnapshot(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
+	ok := rf.peers[peer].Call("Raft.InstallSnapshot", request, response)
+	return ok
+}
+
+func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+
+}
 
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
@@ -188,10 +215,12 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 		response.Term, response.VoteGranted = rf.currentTerm, false
 		return
 	}
+
 	if request.Term > rf.currentTerm {
 		rf.ChangeState(Follower)
 		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
+
 	if !rf.isLogUpToDate(request.LastLogIndex, request.LastLogTerm) {
 		response.Term, response.VoteGranted = rf.currentTerm, false
 		return
@@ -345,11 +374,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEnt
 	}
 
 	if request.Term > rf.currentTerm {
+		rf.ChangeState(Follower)
 		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
 
 	DPrintf("{Node %v} HeartBeat", rf.me)
-	rf.ChangeState(Follower)
 	rf.electionTimer.Reset(RandomizedElectionTimeout())
 
 	if request.PrevLogIndex < rf.getFirstLog().Index {
@@ -458,34 +487,6 @@ func (rf *Raft) replicateOneRound(peer int) {
 	}
 }
 
-type InstallSnapshotRequest struct {
-	Term 				int
-	LearderId			int
-	LastIncludedIndex	int
-	LastIncludedTerm	int
-	Offset				int
-	Data				[]byte
-	Done				bool
-}
-
-type InstallSnapshotResponse struct {
-	Term				int
-}
-
-func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
-	request := new(InstallSnapshotRequest)
-	return request
-}
-
-func (rf *Raft) sendInstallSnapshot(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
-	ok := rf.peers[peer].Call("Raft.InstallSnapshot", request, response)
-	return ok
-}
-
-func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
-
-}
-
 
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
@@ -515,8 +516,8 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.ChangeState(Candidate)
 			rf.currentTerm++
-			rf.StartElection()
 			rf.electionTimer.Reset(RandomizedElectionTimeout())
+			rf.StartElection()
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
@@ -681,8 +682,8 @@ func Min(a, b int) int {
 }
 
 const (
-	HeartbeatTimeout = 125
-	ElectionTimeout  = 1000
+	HeartbeatTimeout = 100
+	ElectionTimeout  = 500
 )
 
 func StableHeartbeatTimeout() time.Duration {
