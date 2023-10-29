@@ -93,6 +93,9 @@ type Raft struct {
 
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
+
+	LastIncludedIndex 	int
+	LastIncludedTerm	int
 }
 
 // return currentTerm and whether this server
@@ -122,8 +125,10 @@ func (rf *Raft) persist() {
 	enc.Encode(rf.currentTerm)
 	enc.Encode(rf.votedFor)
 	enc.Encode(rf.logs)
+	enc.Encode(rf.LastIncludedIndex)
+	enc.Encode(rf.LastIncludedTerm)
 	data := w.Bytes()
-	rf.persister.Save(data, nil)
+	rf.persister.Save(data, rf.persister.ReadSnapshot())
 }
 
 
@@ -138,12 +143,16 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var logs []Entry
-	if dec.Decode(&currentTerm) != nil || dec.Decode(&votedFor) != nil || dec.Decode(&logs) != nil {
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+	if dec.Decode(&currentTerm) != nil || dec.Decode(&votedFor) != nil || dec.Decode(&logs) != nil || dec.Decode(&lastIncludedIndex) != nil || dec.Decode(&lastIncludedTerm) != nil {
 		panic("readPersist failed")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
+		rf.LastIncludedIndex = lastIncludedIndex
+		rf.LastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -170,6 +179,7 @@ func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest {
 	request.Offset = 0
 	request.Data = rf.persister.ReadSnapshot()
 	request.Done = true
+	// DPrintf("{Node %v} generates InstallSnapshotRequest %v", rf.me, request)
 	return request
 }
 
@@ -192,12 +202,14 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if lastIncludedIndex > rf.getLastLog().Index {
 		rf.logs = make([]Entry, 1)
 	} else {
-		rf.logs = shrinkEntriesArray(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.logs = rf.logs[lastIncludedIndex-rf.getFirstLog().Index:]	
 		rf.logs[0].Command = nil
 	}
 	// update dummy entry with lastIncludedTerm and lastIncludedIndex
 	rf.logs[0].Term, rf.logs[0].Index = lastIncludedTerm, lastIncludedIndex
 	rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
+	rf.LastIncludedIndex, rf.LastIncludedTerm = lastIncludedIndex, lastIncludedTerm
+	rf.persist()
 
 	rf.persister.Save(rf.persister.ReadRaftState(), snapshot)
 	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
@@ -240,12 +252,14 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *Insta
 	}
 
 	go func() {
+		DPrintf("apply snapshot")
 		rf.applyCh <- ApplyMsg{
 			SnapshotValid: true,
 			Snapshot:      request.Data,
 			SnapshotTerm:  request.LastIncludedTerm,
 			SnapshotIndex: request.LastIncludedIndex,
 		}
+		rf.CondInstallSnapshot(request.LastIncludedTerm, request.LastIncludedIndex, request.Data)
 	}()
 }
 
@@ -262,9 +276,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
 		return
 	}
-	rf.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
+	rf.LastIncludedIndex = index
+	rf.LastIncludedTerm = rf.logs[index-snapshotIndex].Term
+	rf.persist()
+	rf.logs = rf.logs[index-snapshotIndex:]
 	rf.logs[0].Command = nil
 	rf.persister.Save(rf.persister.ReadRaftState(), snapshot)
+	// DPrintf("{Node %v}'s snapshot %v", rf.me, rf.persister.ReadSnapshot())
 	DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index, snapshotIndex)
 }
 
@@ -406,11 +424,11 @@ func (rf *Raft) genAppendEntriesRequest(prevLogIndex int) *AppendEntriesRequest 
 	request.Term = rf.currentTerm
 	request.LeaderId = rf.me
 	request.PrevLogIndex = prevLogIndex
-	request.PrevLogTerm = rf.logs[prevLogIndex].Term
-	request.Entries = make([]Entry, len(rf.logs[prevLogIndex+1:]))
-	copy(request.Entries, rf.logs[prevLogIndex+1:])
+	request.PrevLogTerm = rf.logs[prevLogIndex-rf.getFirstLog().Index].Term
+	request.Entries = make([]Entry, len(rf.logs[prevLogIndex+1-rf.getFirstLog().Index:]))
+	copy(request.Entries, rf.logs[prevLogIndex+1-rf.getFirstLog().Index:])
 	request.LeaderCommit = rf.commitIndex
-	DPrintf("{Node %v} generates AppendEntriesRequest %v", rf.me, request)
+	// DPrintf("{Node %v} generates AppendEntriesRequest %v", rf.me, request)
 	return request
 }
 
@@ -461,7 +479,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEnt
 		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
 
-	DPrintf("{Node %v} HeartBeat", rf.me)
+	// DPrintf("{Node %v} HeartBeat", rf.me)
 	rf.ChangeState(Follower)
 	rf.electionTimer.Reset(RandomizedElectionTimeout())
 
@@ -491,17 +509,13 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEnt
 	firstIndex := rf.getFirstLog().Index
 	for index, entry := range request.Entries {
 		if entry.Index-firstIndex >= len(rf.logs) || rf.logs[entry.Index-firstIndex].Term != entry.Term {
-			rf.logs = shrinkEntriesArray(append(rf.logs[:entry.Index-firstIndex], request.Entries[index:]...))
+			rf.logs = append(rf.logs[:entry.Index-firstIndex], request.Entries[index:]...)
 			break
 		}
 	}
 	rf.advanceCommitIndexForFollower(request.LeaderCommit)
 	response.Term, response.Success = rf.currentTerm, true
 	// DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request, response)
-}
-
-func shrinkEntriesArray(entries []Entry) []Entry {
-	return entries
 }
 
 func (rf *Raft) advanceCommitIndexForLeader() {
@@ -536,7 +550,7 @@ func (rf *Raft) matchLog(prevLogIndex int, prevLogTerm int) bool {
 	if rf.getLastLog().Index < prevLogIndex {
 		return false
 	}
-	if rf.logs[prevLogIndex].Term != prevLogTerm {
+	if rf.logs[prevLogIndex-rf.getFirstLog().Index].Term != prevLogTerm {
 		return false
 	}
 	return true
@@ -606,7 +620,7 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
 			if rf.state == Leader {
-				DPrintf("{Node %v} Broadcast Heartbeat", rf.me)
+				// DPrintf("{Node %v} Broadcast Heartbeat", rf.me)
 				rf.BroadcastHeartbeat(true)
 				rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
 			}
@@ -669,7 +683,7 @@ func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 		}
 
 		if isHeartBeat {
-			DPrintf("{Node %v} HeartBeat to Node %v", rf.me, peer)
+			// DPrintf("{Node %v} HeartBeat to Node %v", rf.me, peer)
 			go rf.replicateOneRound(peer)
 		} else {
 			rf.replicatorCond[peer].Signal()
@@ -702,12 +716,13 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.matchIndex = make([]int, len(peers))
 	rf.heartbeatTimer = time.NewTimer(StableHeartbeatTimeout())
 	rf.electionTimer = time.NewTimer(RandomizedElectionTimeout())
+	rf.LastIncludedIndex = 0
 
 
 	// Your initialization code here (2A, 2B, 2C).
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.lastApplied, rf.commitIndex = rf.LastIncludedIndex, rf.LastIncludedIndex
 	rf.applyCond = sync.NewCond(&rf.mu)
 	lastLog := rf.getLastLog()
 	for i := 0; i < len(peers); i++ {
@@ -793,6 +808,7 @@ func (rf *Raft) replicator(peer int) {
 		for !rf.needReplicating(peer) {
 			rf.replicatorCond[peer].Wait()
 		}
+		// DPrintf("replicateOneRound on %v", peer)
 		rf.replicateOneRound(peer)
 	}
 }
