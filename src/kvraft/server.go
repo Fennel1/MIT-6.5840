@@ -44,6 +44,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	
+	kv.mu.Unlock()
 }
 
 // the tester calls Kill() when a KVServer instance won't
